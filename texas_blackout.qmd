@@ -50,7 +50,8 @@ library(kableExtra)   # table styling
 
 ```{r}
 # Read in the VIIRS night light tiles
-# A2021038 = Feb 7, 2021 (before storms); A2021047 = Feb 16, 2021 (after storms)
+# A2021038 = Feb 7, 2021 (before storms); A2021047 = Feb 16, 2021 
+# (after storms)
 feb07_tile1 <- read_stars(here("data", "VNP46A1", 
                 "VNP46A1.A2021038.h08v05.001.2021039064328.tif"))
 feb07_tile2 <- read_stars(here("data", "VNP46A1", 
@@ -81,14 +82,16 @@ night_feb07
 ```{r}
 # Read in only highways (motorways) from the roads data
 highways <- st_read(here("data", "gis_osm_roads_free_1.gpkg"),
-                    query = "SELECT * FROM gis_osm_roads_free_1 WHERE fclass='motorway'",
+                    query = "SELECT * FROM gis_osm_roads_free_1 WHERE 
+                            fclass='motorway'",
                     quiet = TRUE)
 
 # Read in only residential buildings
 homes <- st_read(here("data", "gis_osm_buildings_a_free_1.gpkg"),
                  query = "SELECT * FROM gis_osm_buildings_a_free_1
                           WHERE (type IS NULL AND name IS NULL)
-                          OR type IN ('residential', 'apartments', 'house', 'static_caravan', 'detached')",
+                          OR type IN ('residential', 'apartments', 'house', 
+                          'static_caravan', 'detached')",
                  quiet = TRUE)
 ```
 
@@ -126,21 +129,24 @@ summary(as.vector(blackout_mask[[1]]))
 ```
 
 ```{r}
-# Vectorize the blackout mask to convert from a raster to a vector and fix any invalid geometries
+# Vectorize the blackout mask to convert from a raster to a vector 
+# and fix any invalid geometries
 blackout_mask <- st_as_sf(blackout_mask)
 blackout_mask <- st_make_valid(blackout_mask)
 ```
 
 ```{r}
 # Work to crop (spatially subset) the blackout mask to the Houston area
-# Corner coordinates of the Houston bounding box (first point repeated to close the polygon)
+# Corner coordinates of the Houston bounding box (first point 
+# repeated to close the polygon)
 houston_coords <- rbind(c(-96.5, 29), 
                           c(-96.5, 30.5), 
                           c(-94.5, 30.5), 
                           c(-94.5, 29), 
                           c(-96.5, 29))
 
-# Turn the coordinates into a polygon with the same CRS as the blackout data (EPSG:4326)
+# Turn the coordinates into a polygon with the same CRS as the 
+# blackout data (EPSG:4326)
 houston_bbox <- st_sfc(st_polygon(list(houston_coords)), crs = 4326)
 ```
 
@@ -185,7 +191,8 @@ highways_union <- st_union(highways_buffer)
 ```
 
 ```{r}
-# Check that the blackout and highway layers have the same CRS before subtracting
+# Check that the blackout and highway layers have the same CRS before 
+# subtracting
 if (st_crs(blackout) != st_crs(highways_union)) {
   stop("blackout and highways_union do not have the same CRS")
 }
@@ -223,7 +230,8 @@ if (st_crs(homes) != st_crs(no_highway)) {
 ```
 
 ```{r}
-# Identify homes that overlap with areas that experienced blackouts by filtering
+# Identify homes that overlap with areas that experienced blackouts 
+# by filtering
 # Checking that homes_filtered is smaller than homes
 homes_filtered <- st_filter(homes, no_highway)
 print(nrow(homes))
@@ -254,16 +262,20 @@ light_breaks <- c(0, 50, 100, 200, 500, 1000, Inf)
 
 # Map night lights before the storms
 map_feb07 <- tm_shape(feb07_houston) +
-  tm_raster(col.scale = tm_scale_intervals(breaks = light_breaks, values = "viridis"),
-            col.legend = tm_legend(title = "Night light intensity\n(nW cm^-2 sr^-1)")) +
+  tm_raster(col.scale = tm_scale_intervals(breaks = light_breaks, 
+                                           values = "viridis"),
+            col.legend = tm_legend(title = "Night light intensity\n
+                                            (nW cm^-2 sr^-1)")) +
   tm_title("Houston night lights before the storms (Feb 7, 2021)") +
   tm_scalebar(position = c("left", "bottom")) +
   tm_compass(position = c("right", "top"))
 
 # Map night lights after the storms
 map_feb16 <- tm_shape(feb16_houston) +
-  tm_raster(col.scale = tm_scale_intervals(breaks = light_breaks, values = "viridis"),
-            col.legend = tm_legend(title = "Night light intensity\n(nW cm⁻² sr⁻¹)")) +
+  tm_raster(col.scale = tm_scale_intervals(breaks = light_breaks, 
+                                           values = "viridis"),
+            col.legend = tm_legend(title = "Night light intensity\n
+                                            (nW cm⁻² sr⁻¹)")) +
   tm_title("Houston night lights after the storms (Feb 16, 2021)") +
   tm_scalebar(position = c("left", "bottom")) +
   tm_compass(position = c("right", "top"))
@@ -291,7 +303,8 @@ tm_shape(houston_bbox_3083) +
   tm_shape(homes_filtered) +
   tm_polygons(fill = "firebrick", col = "firebrick") +
   tm_add_legend(type = "polygons",
-                labels = c("Blackout area (excluding highways)", "Homes that lost power"),
+                labels = c("Blackout area (excluding highways)", 
+                            "Homes that lost power"),
                 fill = c("grey80", "firebrick")) +
   tm_title("Houston homes that lost power after the February 2021 storms") +
   tm_scalebar(position = c("left", "bottom")) +
@@ -307,7 +320,8 @@ This map shows residential buildings (red) located within blackout areas (gray),
 # Summary table of homes that lost power
 tibble(`Total homes in Houston area` = nrow(homes),
        `Homes that lost power` = nrow(homes_filtered),
-       `Percent of homes` = round(nrow(homes_filtered) / nrow(homes) * 100, 1)) |>
+       `Percent of homes` = round(nrow(homes_filtered) / 
+                                 nrow(homes) * 100, 1)) |>
   kable(caption = "Estimated Houston homes that lost power, February 2021",
         format.args = list(big.mark = ",")) |>
   kable_styling(full_width = FALSE)
