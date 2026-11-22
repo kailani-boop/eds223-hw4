@@ -1,0 +1,307 @@
+---
+title: "EDS 223 HW 4: Impacts of Texas Winter Storms on Houston's Power Grid"
+author: "Kailani Latimer"
+date: last-modified
+format: 
+  pdf:
+    toc: true
+editor_options: 
+  chunk_output_type: console
+execute: 
+  warning: false
+  message: false
+---
+
+## Background
+
+In February 2021, Texas experienced a major power crisis after three severe winter storms swept across the United States on February 10–11, 13–17, and 15–20. Freezing temperatures increased demand for electricity while also causing failures across the state's power generation infrastructure, leaving millions of Texans without power, some for several days.
+
+Satellite imagery offers a way to estimate where these outages occurred. The Visible Infrared Imaging Radiometer Suite (VIIRS) on the Suomi NPP satellite measures night light intensity, and a drop in night lights between two dates can indicate areas that lost power. By combining these remotely sensed data with OpenStreetMap road and building data, we can estimate how many homes in the Houston metropolitan area were affected.
+
+
+## Purpose
+
+The goal of this analysis is to estimate the number of homes in the Houston metropolitan area that lost power as a result of the February 2021 winter storms. To do this, I will:
+
+1. Merge VIIRS night light tiles to create one raster for before (February 7, 2021) and one for after (February 16, 2021) the storms
+2. Create a blackout mask of areas where night light intensity dropped by more than 200 nW cm⁻² sr⁻¹
+3. Exclude areas within 200 m of highways, since highway lights can change for reasons other than power outages
+4. Identify residential buildings within the blackout areas and estimate the number of homes that lost power
+
+
+## Data
+
+- **Night lights:** VIIRS Day/Night Band daily night light imagery (VNP46A1) from NASA's Level-1 and Atmosphere Archive & Distribution System Distributed Active Archive Center (LAADS DAAC). The Houston area spans two tiles (h08v05 and h08v06). Images from February 7 and February 16, 2021 were selected because they were the clearest images before and after the storms.
+- **Roads:** OpenStreetMap road data for the Houston metropolitan area, redistributed by Geofabrik. Only highways (motorways) are used to identify and exclude areas near highways.
+- **Buildings:** OpenStreetMap building footprints for the Houston metropolitan area, redistributed by Geofabrik. Only residential buildings are used to estimate the number of homes affected.
+
+
+## Setup
+
+```{r}
+# Load packages
+library(tidyverse)    # data wrangling
+library(sf)           # vector data
+library(stars)        # raster data
+library(terra)        # raster operations
+library(here)         # file paths
+library(tmap)         # map making
+library(kableExtra)   # table styling
+library(testthat)     # unit tests
+```
+
+```{r}
+# Read in the VIIRS night light tiles
+# A2021038 = Feb 7, 2021 (before storms); A2021047 = Feb 16, 2021 (after storms)
+feb07_tile1 <- read_stars(here("data", "VNP46A1", "VNP46A1.A2021038.h08v05.001.2021039064328.tif"))
+feb07_tile2 <- read_stars(here("data", "VNP46A1", "VNP46A1.A2021038.h08v06.001.2021039064329.tif"))
+feb16_tile1 <- read_stars(here("data", "VNP46A1", "VNP46A1.A2021047.h08v05.001.2021048091106.tif"))
+feb16_tile2 <- read_stars(here("data", "VNP46A1", "VNP46A1.A2021047.h08v06.001.2021048091105.tif"))
+
+# Combine the two tiles for each date into one raster
+night_feb07 <- st_mosaic(feb07_tile1, feb07_tile2)
+night_feb16 <- st_mosaic(feb16_tile1, feb16_tile2)
+```
+
+```{r}
+# Check that both dates have the same CRS and dimensions before comparing them
+if (st_crs(night_feb07) != st_crs(night_feb16)) {
+  stop("The two night light rasters have different CRSs")
+}
+if (!all(dim(night_feb07) == dim(night_feb16))) {
+  stop("The two night light rasters have different dimensions")
+}
+
+# Look at the merged rasters
+night_feb07
+plot(night_feb07, main = "Night lights, Feb 7 2021")
+```
+
+```{r}
+# Read in only highways (motorways) from the roads data
+highways <- st_read(here("data", "gis_osm_roads_free_1.gpkg"),
+                    query = "SELECT * FROM gis_osm_roads_free_1 WHERE fclass='motorway'",
+                    quiet = TRUE)
+
+# Read in only residential buildings
+homes <- st_read(here("data", "gis_osm_buildings_a_free_1.gpkg"),
+                 query = "SELECT * FROM gis_osm_buildings_a_free_1
+                          WHERE (type IS NULL AND name IS NULL)
+                          OR type IN ('residential', 'apartments', 'house', 'static_caravan', 'detached')",
+                 quiet = TRUE)
+```
+
+```{r}
+# Check CRS of each dataset
+st_crs(night_feb07)$epsg
+st_crs(highways)$epsg
+st_crs(homes)$epsg
+```
+
+
+## Blackout Mask
+
+```{r}
+# Finding the change in night lights
+change <- night_feb07 - night_feb16
+
+# Wrap in as.vector() to flatten the grid into one long list of numbers first
+summary(as.vector(change[[1]]))
+```
+
+```{r}
+# Copy the difference raster so the original stays intact
+blackout_mask <- change
+
+# Set cells with a drop of 200 or less to NA (not a blackout)
+blackout_mask[blackout_mask <= 200] <- NA
+
+# Check: min should now be above 200
+summary(as.vector(blackout_mask[[1]]))
+```
+
+```{r}
+# Vectorize the blackout mask to convert from a raster to a vector and fix any invalid geometries
+blackout_mask <- st_as_sf(blackout_mask)
+blackout_mask <- st_make_valid(blackout_mask)
+```
+
+```{r}
+# Work to crop (spatially subset) the blackout mask to the Houston area
+# Corner coordinates of the Houston bounding box (first point repeated to close the polygon)
+houston_coords <- rbind(c(-96.5, 29), 
+                          c(-96.5, 30.5), 
+                          c(-94.5, 30.5), 
+                          c(-94.5, 29), 
+                          c(-96.5, 29))
+
+# Turn the coordinates into a polygon with the same CRS as the blackout data (EPSG:4326)
+houston_bbox <- st_sfc(st_polygon(list(houston_coords)), crs = 4326)
+```
+
+```{r}
+# Check that both datasets have the same CRS before comparing them
+if (st_crs(blackout_mask) != st_crs(houston_bbox)) {
+  stop("The two datasets have different CRSs")
+}
+```
+
+```{r}
+# Finishing the cropped process
+blackout_crop <- st_crop(blackout_mask, houston_bbox)
+blackout_crop
+```
+
+```{r}
+# Re-project the cropped blackout dataset to EPSG:3083
+blackout <- st_transform(blackout_crop, crs = 3083)
+st_crs(blackout)$epsg
+```
+
+
+## Exclude Highways From the Cropped Blackout Mask
+
+Highways may have experienced changes in their night light intensities that are unrelated to the storm. Therefore, I should excluded any locations within 200 meters of all highways in the Houston area.
+
+```{r}
+# Transform highways to EPSG:3083 too
+highways <- st_transform(highways, crs = 3083)
+st_crs(highways)$epsg
+```
+
+```{r}
+# Buffer the highways by 200m
+highways_buffer <- st_buffer(highways, dist = 200)
+```
+
+```{r}
+# Identify areas within 200m of all highways
+highways_union <- st_union(highways_buffer)
+```
+
+```{r}
+# Check that the blackout and highway layers have the same CRS before subtracting
+if (st_crs(blackout) != st_crs(highways_union)) {
+  stop("blackout and highways_union do not have the same CRS")
+}
+
+# Subtract the highway zone from blackout
+# Comparing the areas of blackout and blackout with no highways
+print(sum(st_area(blackout)))
+no_highway <- st_difference(blackout, highways_union)
+print(sum(st_area(no_highway)))
+```
+
+
+## Identify the Number of Homes Likely Impacted by Blackouts
+
+```{r}
+# Transform homes to the same CRS
+homes <- st_transform(homes, crs = 3083)
+st_crs(homes)$epsg
+```
+
+```{r}
+# Check that the homes and no highway layers have the same CRS
+if (st_crs(homes) != st_crs(no_highway)) {
+  stop("blackout and highways_union do not have the same CRS")
+}
+```
+
+```{r}
+# Identify homes that overlap with areas that experienced blackouts by filtering
+# Checking that homes_filtered is smaller than homes
+homes_filtered <- st_filter(homes, no_highway)
+print(nrow(homes))
+print(nrow(homes_filtered))
+```
+
+
+## Plots, Tables, and Maps
+
+#### 1. Before and After Night Light Maps
+
+```{r}
+# Crop the night light rasters to the Houston area for mapping
+feb07_houston <- st_crop(night_feb07, houston_bbox)
+feb16_houston <- st_crop(night_feb16, houston_bbox)
+
+# Use the same breaks for both maps so they can be compared directly
+light_breaks <- c(0, 50, 100, 200, 500, 1000, Inf)
+
+# Map night lights before the storms
+map_feb07 <- tm_shape(feb07_houston) +
+  tm_raster(col.scale = tm_scale_intervals(breaks = light_breaks, values = "viridis"),
+            col.legend = tm_legend(title = "Night light intensity\n(nW cm⁻² sr⁻¹)")) +
+  tm_title("Houston night lights before the storms (Feb 7, 2021)") +
+  tm_scalebar(position = c("left", "bottom")) +
+  tm_compass(position = c("right", "top"))
+
+# Map night lights after the storms
+map_feb16 <- tm_shape(feb16_houston) +
+  tm_raster(col.scale = tm_scale_intervals(breaks = light_breaks, values = "viridis"),
+            col.legend = tm_legend(title = "Night light intensity\n(nW cm⁻² sr⁻¹)")) +
+  tm_title("Houston night lights after the storms (Feb 16, 2021)") +
+  tm_scalebar(position = c("left", "bottom")) +
+  tm_compass(position = c("right", "top"))
+
+# Display side by side
+tmap_arrange(map_feb07, map_feb16, nrow = 1)
+```
+
+These maps compare night light intensity in the Houston area before (February 7, 2021) and after (February 16, 2021) the winter storms, using the same color scale. On February 7, the urban core and major highways appear bright and continuous. By February 16, many neighborhoods in the central and western parts of the city have dropped into lower intensity classes, and the highway network is less distinct, suggesting widespread power loss. Some areas appear brighter after the storm, which may be due to factors like snow cover or differences in moonlight and atmospheric conditions between the two dates, rather than actual changes in electricity use.
+
+
+#### Map of Homes That Lost Power
+
+```{r}
+# Reproject the Houston bounding box to match the blackout data for mapping
+houston_bbox_3083 <- st_transform(houston_bbox, crs = 3083)
+
+# Map homes that lost power within the blackout areas
+tm_shape(houston_bbox_3083) +
+  tm_borders(col = "grey40") +
+  tm_shape(no_highway) +
+  tm_polygons(fill = "grey80", col = "grey80") +  
+  tm_shape(homes_filtered) +
+  tm_polygons(fill = "firebrick", col = "firebrick") +
+  tm_add_legend(type = "polygons",
+                labels = c("Blackout area (excluding highways)", "Homes that lost power"),
+                fill = c("grey80", "firebrick")) +
+  tm_title("Houston homes that lost power after the February 2021 storms") +
+  tm_scalebar(position = c("left", "bottom")) +
+  tm_compass(position = c("right", "top"))
+```
+
+This map shows residential buildings (red) located within blackout areas (gray), where night light intensity dropped by more than 200 nW ${text}{cm}^(-1)$ ${text}{sr}^(-1)$ and that are more than 200 m from a highway. Homes that lost power are concentrated in the central and western parts of Houston, with smaller clusters scattered throughout the surrounding metro area. The bounding box appears slightly tilted because the data were reprojected to the Texas Centric Albers Equal Area projection (EPSG:3083).
+
+
+#### Estimate of Homes
+
+An estimated **`r format(nrow(homes_filtered), big.mark = ",")`** homes in the Houston metropolitan area lost power as a result of the February 2021 winter storms.
+
+```{r}
+# Summary table of homes that lost power
+tibble(`Total homes in Houston area` = nrow(homes),
+       `Homes that lost power` = nrow(homes_filtered),
+       `Percent of homes` = round(nrow(homes_filtered) / nrow(homes) * 100, 1)) |>
+  kable(caption = "Estimated Houston homes that lost power, February 2021",
+        format.args = list(big.mark = ",")) |>
+  kable_styling(full_width = FALSE)
+```
+
+An estimated 157,408 homes in the Houston metropolitan area lost power as a result of the February 2021 winter storms, which is about 33% of the 475,941 homes in the dataset.
+
+
+## Reflection
+
+Based on changes in night light intensity, I estimate that about 157,408 homes in the Houston metropolitan area, roughly one third of homes in the dataset, lost power after the February 2021 winter storms. This analysis has several limitations. The 200 nW cm⁻² sr⁻¹ blackout threshold and 200 m highway buffer are somewhat arbitrary, and different cutoffs would change the estimate. Clouds, moonlight, and snow cover can affect night light measurements, and comparing only two dates may miss outages that started or ended between them. Areas that were already dark cannot show a drop. Finally, OpenStreetMap building tags are incomplete, so some unlabeled buildings counted as homes may not be residential. 
+
+
+## References
+- EDS 223 Homework 4 instructions: [EDS 223 HW 4](https://eds-223-geospatial.github.io/assignments/HW4.html)
+- Román, M. O., Wang, Z., Sun, Q., Kalb, V., Miller, S. D., Molthan, A., Schultz, L., Bell, J., Stokes, E. C., Pandey, B., Seto, K. C., Hall, D., Oda, T., Wolfe, R. E., Lin, G., Golpayegani, N., Devadiga, S., Davidson, C., Sarkar, S., ... Masuoka, E. J. (2018). NASA's Black Marble nighttime lights product suite. *Remote Sensing of Environment*, 210, 113–143. [https://doi.org/10.1016/j.rse.2018.03.008](https://doi.org/10.1016/j.rse.2018.03.008)
+- Román, M. O., Wang, Z., Shrestha, R., Yao, T., & Kalb, V. (2019). *VIIRS/NPP Daily Gridded Day Night Band 15 arc-second Linear Lat Lon Grid Night (VNP46A1), Version 1* [Dataset]. NASA LAADS DAAC. [https://doi.org/10.5067/VIIRS/VNP46A1.001](https://doi.org/10.5067/VIIRS/VNP46A1.001)
+- OpenStreetMap contributors. (2021). *OpenStreetMap data for Texas* [Dataset]. Retrieved from Geofabrik Download Server. [https://download.geofabrik.de/](https://download.geofabrik.de/)
+- NASA Worldview. [https://worldview.earthdata.nasa.gov/](https://worldview.earthdata.nasa.gov/)
+- Wikipedia contributors. (2021, October 2). 2021 Texas power crisis. In *Wikipedia, The Free Encyclopedia*. [https://en.wikipedia.org/wiki/2021_Texas_power_crisis](https://en.wikipedia.org/wiki/2021_Texas_power_crisis)
